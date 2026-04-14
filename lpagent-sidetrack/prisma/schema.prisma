@@ -1,0 +1,153 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Meteora pools discovered via /pools/discover
+// ---------------------------------------------------------------------------
+model Pool {
+  id               String   @id @default(uuid())
+  poolId           String   @unique   // Meteora pool address (pubkey)
+  name             String
+  tokenX           String             // mint address
+  tokenY           String             // mint address
+  tokenXSymbol     String
+  tokenYSymbol     String
+  binStep          Int
+  baseFeePercent   Float
+  tvlUsd           Float    @default(0)
+  volume24hUsd     Float    @default(0)
+  apr              Float    @default(0)
+  currentPrice     Float    @default(0)
+  lastSyncedAt     DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  positions        Position[]
+  zapTransactions  ZapTransaction[]
+
+  @@index([tvlUsd(sort: Desc)])
+  @@index([apr(sort: Desc)])
+  @@index([lastSyncedAt])
+}
+
+// ---------------------------------------------------------------------------
+// LP positions owned by monitored wallets
+// ---------------------------------------------------------------------------
+model Position {
+  id               String          @id @default(uuid())
+  positionId       String          @unique   // on-chain position pubkey
+  walletAddress    String
+  poolId           String
+  pool             Pool            @relation(fields: [poolId], references: [poolId])
+  lowerBinId       Int
+  upperBinId       Int
+  activeBinId      Int
+  inRange          Boolean
+  totalXAmount     String          // raw token amount string
+  totalYAmount     String
+  feeX             String          @default("0")
+  feeY             String          @default("0")
+  valueUsd         Float           @default(0)
+  feesEarnedUsd    Float           @default(0)
+  lastCheckedAt    DateTime        @default(now())
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  alerts           Alert[]
+  zapTransactions  ZapTransaction[]
+
+  @@index([walletAddress])
+  @@index([inRange])
+  @@index([lastCheckedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Zap-in / zap-out transaction records
+// ---------------------------------------------------------------------------
+model ZapTransaction {
+  id             String         @id @default(uuid())
+  type           ZapType
+  status         ZapStatus      @default(PENDING)
+  walletAddress  String
+  positionId     String?        // for zap-out
+  poolId         String?        // for zap-in
+  pool           Pool?          @relation(fields: [poolId], references: [poolId])
+  position       Position?      @relation(fields: [positionId], references: [positionId])
+
+  // Zap-in specific
+  strategy       String?        // Spot | Curve | BidAsk
+  fromBinId      Int?
+  toBinId        Int?
+  amountX        String?
+  amountY        String?
+
+  // Zap-out specific
+  bps            Int?           // 0-10000 = percentage to withdraw
+  outputMode     String?        // allToken0 | allToken1 | both
+
+  // Execution result
+  txSignature    String?        @unique
+  errorMessage   String?
+  slippageBps    Int            @default(50)
+  estimatedValueUsd Float?
+
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([walletAddress])
+  @@index([status])
+  @@index([type])
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Alerts for out-of-range or anomalous positions
+// ---------------------------------------------------------------------------
+model Alert {
+  id            String      @id @default(uuid())
+  walletAddress String
+  positionId    String
+  position      Position    @relation(fields: [positionId], references: [positionId])
+  type          AlertType   @default(OUT_OF_RANGE)
+  status        AlertStatus @default(PENDING)
+  message       String
+  metadata      Json        @default("{}")
+  resolvedAt    DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([walletAddress])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum ZapType {
+  ZAP_IN
+  ZAP_OUT
+}
+
+enum ZapStatus {
+  PENDING
+  SIGNED
+  SUBMITTED
+  CONFIRMED
+  FAILED
+}
+
+enum AlertType {
+  OUT_OF_RANGE
+  LOW_LIQUIDITY
+  HIGH_IMPERMANENT_LOSS
+}
+
+enum AlertStatus {
+  PENDING
+  ACKNOWLEDGED
+  RESOLVED
+}
