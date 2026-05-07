@@ -1,14 +1,10 @@
 import "dotenv/config";
 
-// ---------------------------------------------------------------------------
-// Base URL & auth
-// ---------------------------------------------------------------------------
-
 const BASE_URL = "https://api.lpagent.io/open-api/v1";
 
 function getApiKey(): string {
   const key = process.env["LPAGENT_API_KEY"];
-  if (!key) throw new Error("LPAGENT_API_KEY environment variable is not set");
+  if (!key) throw new Error("LPAGENT_API_KEY is not set");
   return key;
 }
 
@@ -26,24 +22,17 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   if (!response.ok) {
     const body = await response.text().catch(() => "(no body)");
     throw new Error(
-      `LPAgent API ${response.status} ${response.statusText} [${url}]: ${body}`
+      `LPAgent ${response.status} ${response.statusText} [${url}]: ${body}`
     );
   }
 
   return response.json() as Promise<T>;
 }
 
-// ---------------------------------------------------------------------------
-// Types — Pool Discovery
-// ---------------------------------------------------------------------------
-
 export interface PoolDiscoverParams {
-  /** Filter by token mint addresses (comma-separated or array handled externally) */
   tokenX?: string;
   tokenY?: string;
-  /** Sort field: tvl | volume | apr */
   sortBy?: "tvl" | "volume" | "apr";
-  /** Min TVL filter in USD */
   minTvl?: number;
   page?: number;
   limit?: number;
@@ -75,10 +64,6 @@ export interface PoolDetailResponse extends PoolInfo {
   priceRange: { lower: number; upper: number };
   liquidityDistribution: Array<{ binId: number; liquidityUsd: number }>;
 }
-
-// ---------------------------------------------------------------------------
-// Types — LP Positions
-// ---------------------------------------------------------------------------
 
 export interface LpPosition {
   positionId: string;
@@ -125,10 +110,6 @@ export interface PositionOverview {
   outOfRangeCount: number;
 }
 
-// ---------------------------------------------------------------------------
-// Types — Wallet
-// ---------------------------------------------------------------------------
-
 export interface TokenBalance {
   mint: string;
   symbol: string;
@@ -145,10 +126,6 @@ export interface WalletBalanceResponse {
   totalValueUsd: number;
 }
 
-// ---------------------------------------------------------------------------
-// Types — Zap-In
-// ---------------------------------------------------------------------------
-
 export type ZapStrategy = "Spot" | "Curve" | "BidAsk";
 export type ZapOutput = "allToken0" | "allToken1" | "both" | "allBaseToken";
 
@@ -157,23 +134,18 @@ export interface ZapInParams {
   strategy: ZapStrategy;
   fromBinId: number;
   toBinId: number;
-  /** Amount of tokenX to deposit (raw string) */
   amountX?: string;
-  /** Amount of tokenY to deposit (raw string) */
   amountY?: string;
-  /** Slippage in basis points (e.g. 50 = 0.5%) */
   slippageBps: number;
 }
 
 export interface ZapInTxResponse {
-  /** Base64-encoded serialized unsigned transaction */
   transaction: string;
   blockhash: string;
   lastValidBlockHeight: number;
 }
 
 export interface LandingTxParams {
-  /** Base64-encoded signed transaction */
   signedTransaction: string;
 }
 
@@ -182,16 +154,11 @@ export interface LandingTxResponse {
   bundleId?: string;
 }
 
-// ---------------------------------------------------------------------------
-// Types — Zap-Out
-// ---------------------------------------------------------------------------
-
 export interface ZapOutQuoteParams {
   positionId: string;
   owner: string;
-  /** Basis points to withdraw: 10000 = 100% */
+  // basis points to withdraw, 10000 = 100%
   bps: number;
-  /** Slippage in basis points */
   slippageBps: number;
   output: ZapOutput;
 }
@@ -204,19 +171,11 @@ export interface ZapOutQuoteResponse {
 }
 
 export interface ZapOutTxResponse {
-  /** Base64-encoded serialized unsigned transaction */
   transaction: string;
   blockhash: string;
   lastValidBlockHeight: number;
 }
 
-// ---------------------------------------------------------------------------
-// Pool endpoints
-// ---------------------------------------------------------------------------
-
-/**
- * Discover Meteora pools with optional filtering and sorting.
- */
 export async function discoverPools(
   params: PoolDiscoverParams = {}
 ): Promise<DiscoverPoolsResponse> {
@@ -232,16 +191,10 @@ export async function discoverPools(
   return request<DiscoverPoolsResponse>(`/pools/discover${query}`);
 }
 
-/**
- * Get detailed info for a single pool including bin distribution.
- */
 export async function getPoolInfo(poolId: string): Promise<PoolDetailResponse> {
   return request<PoolDetailResponse>(`/pools/${encodeURIComponent(poolId)}/info`);
 }
 
-/**
- * Get on-chain stats for a pool (volume, fees, TVL over time).
- */
 export async function getPoolOnchainStats(
   poolId: string
 ): Promise<Record<string, unknown>> {
@@ -250,13 +203,30 @@ export async function getPoolOnchainStats(
   );
 }
 
-// ---------------------------------------------------------------------------
-// Position endpoints
-// ---------------------------------------------------------------------------
+export interface TopLper {
+  walletAddress: string;
+  totalValueUsd: number;
+  feesEarnedUsd: number;
+  pnlUsd?: number;
+  positionCount?: number;
+  apr?: number;
+  lowerBinId?: number;
+  upperBinId?: number;
+  strategy?: ZapStrategy;
+}
 
-/**
- * Get all currently open LP positions for a wallet.
- */
+export interface TopLpersResponse {
+  poolId: string;
+  lpers: TopLper[];
+}
+
+// Premium tier endpoint, used by the copy-LP feature.
+export async function getTopLpers(poolId: string): Promise<TopLpersResponse> {
+  return request<TopLpersResponse>(
+    `/pools/${encodeURIComponent(poolId)}/top-lpers`
+  );
+}
+
 export async function getOpenPositions(
   owner: string
 ): Promise<OpenPositionsResponse> {
@@ -265,9 +235,6 @@ export async function getOpenPositions(
   );
 }
 
-/**
- * Get historical (closed) LP positions for a wallet.
- */
 export async function getHistoricalPositions(
   owner: string
 ): Promise<HistoricalPositionsResponse> {
@@ -276,9 +243,6 @@ export async function getHistoricalPositions(
   );
 }
 
-/**
- * Get an aggregated portfolio overview (total value, PnL, fee income).
- */
 export async function getPositionOverview(
   owner: string
 ): Promise<PositionOverview> {
@@ -287,9 +251,6 @@ export async function getPositionOverview(
   );
 }
 
-/**
- * Get revenue data for a wallet (7D / 1M ranges).
- */
 export async function getPositionRevenue(
   owner: string
 ): Promise<Record<string, unknown>> {
@@ -298,9 +259,6 @@ export async function getPositionRevenue(
   );
 }
 
-/**
- * Get all SPL + SOL token balances for a wallet.
- */
 export async function getWalletBalance(
   owner: string
 ): Promise<WalletBalanceResponse> {
@@ -309,14 +267,6 @@ export async function getWalletBalance(
   );
 }
 
-// ---------------------------------------------------------------------------
-// Zap-In: add liquidity to a Meteora DLMM pool
-// ---------------------------------------------------------------------------
-
-/**
- * Generate an unsigned zap-in transaction.
- * The caller must sign it and submit via submitZapIn().
- */
 export async function generateZapIn(
   poolId: string,
   params: ZapInParams
@@ -336,9 +286,6 @@ export async function generateZapIn(
   });
 }
 
-/**
- * Submit a signed zap-in transaction via Jito bundle for fast landing.
- */
 export async function submitZapIn(
   params: LandingTxParams
 ): Promise<LandingTxResponse> {
@@ -348,14 +295,6 @@ export async function submitZapIn(
   });
 }
 
-// ---------------------------------------------------------------------------
-// Zap-Out: remove liquidity from a Meteora DLMM position
-// ---------------------------------------------------------------------------
-
-/**
- * Preview how much you'd receive from withdrawing a position.
- * Use this before generating the actual zap-out tx.
- */
 export async function getZapOutQuotes(
   params: ZapOutQuoteParams
 ): Promise<ZapOutQuoteResponse> {
@@ -371,10 +310,6 @@ export async function getZapOutQuotes(
   });
 }
 
-/**
- * Generate an unsigned zap-out transaction.
- * The caller must sign it and submit via submitZapOut().
- */
 export async function generateZapOut(
   params: ZapOutQuoteParams
 ): Promise<ZapOutTxResponse> {
@@ -390,9 +325,6 @@ export async function generateZapOut(
   });
 }
 
-/**
- * Submit a signed zap-out transaction via Jito bundle for fast landing.
- */
 export async function submitZapOut(
   params: LandingTxParams
 ): Promise<LandingTxResponse> {

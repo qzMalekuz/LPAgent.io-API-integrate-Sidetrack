@@ -30,6 +30,7 @@ model Pool {
 
   positions        Position[]
   zapTransactions  ZapTransaction[]
+  insights         Insight[]
 
   @@index([tvlUsd(sort: Desc)])
   @@index([apr(sort: Desc)])
@@ -97,6 +98,9 @@ model ZapTransaction {
   slippageBps    Int            @default(50)
   estimatedValueUsd Float?
 
+  // Source: who triggered it
+  source         String         @default("api")  // api | telegram | autopilot | copylp | dashboard
+
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
@@ -127,6 +131,67 @@ model Alert {
   @@index([createdAt])
 }
 
+// ---------------------------------------------------------------------------
+// Telegram users — link a Telegram chat to one or more Solana wallets
+// ---------------------------------------------------------------------------
+model TelegramUser {
+  id             String   @id @default(uuid())
+  chatId         String   @unique          // Telegram chat ID (string for safety)
+  username       String?
+  walletAddress  String?                   // primary wallet linked to this chat
+  notifyAlerts   Boolean  @default(true)
+  notifyZaps     Boolean  @default(true)
+  notifyInsights Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([walletAddress])
+}
+
+// ---------------------------------------------------------------------------
+// Copy-LP subscriptions — mirror a top LP's strategy on a target pool
+// ---------------------------------------------------------------------------
+model CopyLpSubscription {
+  id              String   @id @default(uuid())
+  followerWallet  String                     // wallet doing the copying
+  leaderWallet    String                     // wallet being copied
+  poolId          String                     // pool to mirror within
+  capitalUsd      Float                      // notional size in USD to deploy
+  strategy        String   @default("Curve") // Spot | Curve | BidAsk
+  active          Boolean  @default(true)
+  lastMirroredAt  DateTime?
+  lastMirrorTxId  String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([followerWallet, leaderWallet, poolId])
+  @@index([active])
+  @@index([leaderWallet])
+}
+
+// ---------------------------------------------------------------------------
+// AI-style insights generated for a wallet/pool (range recommendations,
+// strategy suggestions, IL warnings, fee-velocity alerts, etc.)
+// ---------------------------------------------------------------------------
+model Insight {
+  id            String       @id @default(uuid())
+  walletAddress String?
+  poolId        String?
+  pool          Pool?        @relation(fields: [poolId], references: [poolId])
+  type          InsightType
+  severity      Severity     @default(INFO)
+  title         String
+  body          String
+  data          Json         @default("{}")
+  acknowledged  Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+
+  @@index([walletAddress])
+  @@index([poolId])
+  @@index([type])
+  @@index([createdAt])
+}
+
 enum ZapType {
   ZAP_IN
   ZAP_OUT
@@ -144,10 +209,27 @@ enum AlertType {
   OUT_OF_RANGE
   LOW_LIQUIDITY
   HIGH_IMPERMANENT_LOSS
+  FEE_SPIKE
+  COPY_TRIGGER
 }
 
 enum AlertStatus {
   PENDING
   ACKNOWLEDGED
   RESOLVED
+}
+
+enum InsightType {
+  RANGE_RECOMMENDATION
+  STRATEGY_SUGGESTION
+  IL_WARNING
+  FEE_VELOCITY
+  POOL_OPPORTUNITY
+  PORTFOLIO_REBALANCE
+}
+
+enum Severity {
+  INFO
+  WARNING
+  CRITICAL
 }

@@ -9,63 +9,45 @@ import {
   getZapOutQuotes,
   generateZapIn,
   submitZapIn,
+  getPoolInfo,
+  getTopLpers,
   type ZapStrategy,
   type ZapOutput,
 } from "./lpagent.js";
 import { signTransaction, getWalletAddress } from "./wallet.js";
+import { notifyWallet } from "./telegram.js";
+import {
+  scorePositionHealth,
+  impermanentLossPct,
+  binToPrice,
+} from "./intelligence.js";
 
-// ---------------------------------------------------------------------------
-// Queue payload types
-// ---------------------------------------------------------------------------
-
-/** Discover top Meteora pools and sync to DB */
 export interface SyncPoolsPayload {
   sortBy?: "tvl" | "volume" | "apr";
   minTvlUsd?: number;
   limit?: number;
 }
 
-/** Fetch open positions for a wallet, upsert to DB, trigger alerts/zaps */
 export interface MonitorPositionsPayload {
   walletAddress: string;
-  /**
-   * When true and AUTOPILOT_ENABLED=true, out-of-range positions will be
-   * automatically zapped out. Default: false (alert-only).
-   */
   autoZapOut?: boolean;
 }
 
-/** Alert when a position goes out of range */
 export interface AlertOutOfRangePayload {
   walletAddress: string;
   positionId: string;
   poolName: string;
 }
 
-/**
- * Execute a full zap-out for a position:
- * 1. Get quotes from LP Agent
- * 2. Generate unsigned tx
- * 3. Sign with bot wallet
- * 4. Submit via Jito landing endpoint
- */
 export interface ExecuteZapOutPayload {
   walletAddress: string;
   positionId: string;
-  /** Percentage to withdraw in basis points (default: 10000 = 100%) */
   bps?: number;
   output?: ZapOutput;
   slippageBps?: number;
-  /** Internal ZapTransaction.id to update status */
   zapTransactionId?: string;
 }
 
-/**
- * Execute a full zap-in for a pool:
- * 1. Generate unsigned tx from LP Agent
- * 2. Sign with bot wallet
- * 3. Submit via Jito landing endpoint
- */
 export interface ExecuteZapInPayload {
   walletAddress: string;
   poolId: string;
@@ -75,8 +57,15 @@ export interface ExecuteZapInPayload {
   amountX?: string;
   amountY?: string;
   slippageBps?: number;
-  /** Internal ZapTransaction.id to update status */
   zapTransactionId?: string;
+}
+
+export interface CopyLpPollPayload {
+  subscriptionId?: string;
+}
+
+export interface GenerateInsightsPayload {
+  walletAddress: string;
 }
 
 export type AppQueues = {
@@ -85,28 +74,22 @@ export type AppQueues = {
   alertOutOfRange: AlertOutOfRangePayload;
   executeZapOut: ExecuteZapOutPayload;
   executeZapIn: ExecuteZapInPayload;
+  copyLpPoll: CopyLpPollPayload;
+  generateInsights: GenerateInsightsPayload;
 };
-
-// ---------------------------------------------------------------------------
-// Sidetrack singleton
-// ---------------------------------------------------------------------------
 
 let _sidetrack: Sidetrack<AppQueues> | null = null;
 
 export function getSidetrack(): Sidetrack<AppQueues> {
   if (!_sidetrack) {
-    throw new Error("Sidetrack has not been initialised — call initSidetrack() first");
+    throw new Error("sidetrack not initialised, call initSidetrack() first");
   }
   return _sidetrack;
 }
 
-// ---------------------------------------------------------------------------
-// Queue handler: syncPools
-// ---------------------------------------------------------------------------
-
 async function handleSyncPools(payload: SyncPoolsPayload): Promise<void> {
   const { sortBy = "tvl", minTvlUsd = 10_000, limit = 50 } = payload;
-  console.log(`[syncPools] Discovering top ${limit} pools (sortBy: ${sortBy}, minTvl: $${minTvlUsd})`);
+  console.log(`[syncPools] discovering top ${limit} (sortBy=${sortBy} minTvl=$${minTvlUsd})`);
 
   const result = await discoverPools({ sortBy, minTvl: minTvlUsd, limit });
   const prisma = getPrisma();
@@ -141,12 +124,8 @@ async function handleSyncPools(payload: SyncPoolsPayload): Promise<void> {
     )
   );
 
-  console.log(`[syncPools] Upserted ${result.pools.length} pools`);
+  console.log(`[syncPools] upserted ${result.pools.length} pools`);
 }
-
-// ---------------------------------------------------------------------------
-// Queue handler: monitorPositions
-// ---------------------------------------------------------------------------
 
 async function handleMonitorPositions(
   payload: MonitorPositionsPayload
@@ -156,7 +135,7 @@ async function handleMonitorPositions(
     autoZapOut && process.env["AUTOPILOT_ENABLED"] === "true";
 
   console.log(
-    `[monitorPositions] Checking positions for ${walletAddress} (autopilot: ${autopilotEnabled})`
+    `[monitorPositions] ${walletAddress} (autopilot=${autopilotEnabled})`
   );
 
   const result = await getOpenPositions(walletAddress);
@@ -164,7 +143,7 @@ async function handleMonitorPositions(
   const st = getSidetrack();
 
   for (const pos of result.positions) {
-    // Ensure the pool exists in DB first (create a stub if not yet synced)
+    // stub the pool row if it hasn't been synced yet so the FK holds
     await prisma.pool.upsert({
       where: { poolId: pos.poolId },
       create: {
@@ -214,7 +193,6 @@ async function handleMonitorPositions(
 
     if (!pos.inRange) {
       if (autopilotEnabled) {
-        // Create a ZapTransaction record then queue the zap-out job
         const zapTx = await prisma.zapTransaction.create({
           data: {
             type: "ZAP_OUT",
@@ -238,10 +216,9 @@ async function handleMonitorPositions(
         });
 
         console.log(
-          `[monitorPositions] Queued auto-zap-out for position ${pos.positionId} (pool: ${pos.poolName})`
+          `[monitorPositions] auto-zap-out queued for ${pos.positionId} (${pos.poolName})`
         );
       } else {
-        // Alert-only mode
         await st.insertJob("alertOutOfRange", {
           walletAddress,
           positionId: pos.positionId,
@@ -257,17 +234,11 @@ async function handleMonitorPositions(
   );
 }
 
-// ---------------------------------------------------------------------------
-// Queue handler: alertOutOfRange
-// ---------------------------------------------------------------------------
-
 async function handleAlertOutOfRange(
   payload: AlertOutOfRangePayload
 ): Promise<void> {
   const { walletAddress, positionId, poolName } = payload;
-  console.log(
-    `[alertOutOfRange] Creating alert for wallet ${walletAddress}, pool ${poolName}`
-  );
+  console.log(`[alertOutOfRange] ${walletAddress} / ${poolName}`);
 
   const prisma = getPrisma();
   await prisma.alert.create({
@@ -281,12 +252,19 @@ async function handleAlertOutOfRange(
     },
   });
 
-  console.log(`[alertOutOfRange] Alert saved for ${walletAddress} / ${poolName}`);
+  await notifyWallet(
+    walletAddress,
+    [
+      "*Position out of range*",
+      "",
+      `Pool: *${poolName}*`,
+      `Position: \`${positionId.slice(0, 8)}...\``,
+      "",
+      "Use /positions to zap out, or enable autopilot to do it automatically.",
+    ].join("\n"),
+    { kind: "alert" }
+  );
 }
-
-// ---------------------------------------------------------------------------
-// Queue handler: executeZapOut
-// ---------------------------------------------------------------------------
 
 async function handleExecuteZapOut(
   payload: ExecuteZapOutPayload
@@ -314,11 +292,10 @@ async function handleExecuteZapOut(
   };
 
   console.log(
-    `[executeZapOut] Starting zap-out for position ${positionId} (${bps / 100}%, output: ${output})`
+    `[executeZapOut] ${positionId} (${bps / 100}%, output=${output})`
   );
 
   try {
-    // 1. Get quote first so we can log estimated value
     const quote = await getZapOutQuotes({
       positionId,
       owner: walletAddress,
@@ -328,7 +305,7 @@ async function handleExecuteZapOut(
     });
 
     console.log(
-      `[executeZapOut] Quote: ~$${quote.estimatedValueUsd.toFixed(2)}, impact: ${quote.priceImpactPct.toFixed(3)}%`
+      `[executeZapOut] quote ~$${quote.estimatedValueUsd.toFixed(2)}, impact ${quote.priceImpactPct.toFixed(3)}%`
     );
 
     if (zapTransactionId) {
@@ -338,7 +315,6 @@ async function handleExecuteZapOut(
       });
     }
 
-    // 2. Generate unsigned transaction
     const zapOutTx = await generateZapOut({
       positionId,
       owner: walletAddress,
@@ -347,22 +323,19 @@ async function handleExecuteZapOut(
       output,
     });
 
-    // 3. Sign with bot wallet
     const signedTx = signTransaction(zapOutTx.transaction);
     await updateZapStatus("SIGNED");
-    console.log(`[executeZapOut] Transaction signed by ${getWalletAddress()}`);
+    console.log(`[executeZapOut] signed by ${getWalletAddress()}`);
 
-    // 4. Submit via Jito landing endpoint
     const result = await submitZapOut({ signedTransaction: signedTx });
     await updateZapStatus("SUBMITTED", { txSignature: result.txSignature });
 
     console.log(
-      `[executeZapOut] Submitted tx: ${result.txSignature}${result.bundleId ? ` (bundle: ${result.bundleId})` : ""}`
+      `[executeZapOut] submitted ${result.txSignature}${result.bundleId ? ` (bundle ${result.bundleId})` : ""}`
     );
 
     await updateZapStatus("CONFIRMED", { txSignature: result.txSignature });
 
-    // Create an alert so the user knows the action was taken
     await prisma.alert.create({
       data: {
         walletAddress,
@@ -378,17 +351,31 @@ async function handleExecuteZapOut(
         resolvedAt: new Date(),
       },
     });
+
+    await notifyWallet(
+      walletAddress,
+      [
+        "*Zap-out confirmed*",
+        "",
+        `Position: \`${positionId.slice(0, 8)}...\`  (${bps / 100}%)`,
+        `Estimated value: *$${quote.estimatedValueUsd.toFixed(2)}*`,
+        `Price impact: ${quote.priceImpactPct.toFixed(3)}%`,
+        `Tx: [${result.txSignature.slice(0, 10)}...](https://solscan.io/tx/${result.txSignature})`,
+      ].join("\n"),
+      { kind: "zap" }
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[executeZapOut] Failed for position ${positionId}: ${message}`);
+    console.error(`[executeZapOut] failed for ${positionId}: ${message}`);
     await updateZapStatus("FAILED", { errorMessage: message });
-    throw err; // let Sidetrack retry
+    await notifyWallet(
+      walletAddress,
+      `*Zap-out failed* for \`${positionId.slice(0, 8)}...\`\n\n\`${message}\``,
+      { kind: "zap" }
+    );
+    throw err;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Queue handler: executeZapIn
-// ---------------------------------------------------------------------------
 
 async function handleExecuteZapIn(payload: ExecuteZapInPayload): Promise<void> {
   const {
@@ -417,11 +404,10 @@ async function handleExecuteZapIn(payload: ExecuteZapInPayload): Promise<void> {
   };
 
   console.log(
-    `[executeZapIn] Starting zap-in for pool ${poolId} (strategy: ${strategy}, bins: ${fromBinId}–${toBinId})`
+    `[executeZapIn] pool=${poolId} strategy=${strategy} bins=${fromBinId}-${toBinId}`
   );
 
   try {
-    // 1. Generate unsigned transaction
     const zapInTx = await generateZapIn(poolId, {
       owner: walletAddress,
       strategy,
@@ -432,35 +418,266 @@ async function handleExecuteZapIn(payload: ExecuteZapInPayload): Promise<void> {
       slippageBps,
     });
 
-    // 2. Sign with bot wallet
     const signedTx = signTransaction(zapInTx.transaction);
     await updateZapStatus("SIGNED");
-    console.log(`[executeZapIn] Transaction signed by ${getWalletAddress()}`);
+    console.log(`[executeZapIn] signed by ${getWalletAddress()}`);
 
-    // 3. Submit via Jito landing endpoint
     const result = await submitZapIn({ signedTransaction: signedTx });
     await updateZapStatus("SUBMITTED", { txSignature: result.txSignature });
 
     console.log(
-      `[executeZapIn] Submitted tx: ${result.txSignature}${result.bundleId ? ` (bundle: ${result.bundleId})` : ""}`
+      `[executeZapIn] submitted ${result.txSignature}${result.bundleId ? ` (bundle ${result.bundleId})` : ""}`
     );
 
     await updateZapStatus("CONFIRMED", { txSignature: result.txSignature });
+
+    await notifyWallet(
+      walletAddress,
+      [
+        "*Zap-in confirmed*",
+        "",
+        `Pool: \`${poolId.slice(0, 8)}...\`  (${strategy})`,
+        `Bins: ${fromBinId} -> ${toBinId}`,
+        `Tx: [${result.txSignature.slice(0, 10)}...](https://solscan.io/tx/${result.txSignature})`,
+      ].join("\n"),
+      { kind: "zap" }
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[executeZapIn] Failed for pool ${poolId}: ${message}`);
+    console.error(`[executeZapIn] failed for ${poolId}: ${message}`);
     await updateZapStatus("FAILED", { errorMessage: message });
-    throw err; // let Sidetrack retry
+    await notifyWallet(
+      walletAddress,
+      `*Zap-in failed* for pool \`${poolId.slice(0, 8)}...\`\n\n\`${message}\``,
+      { kind: "zap" }
+    );
+    throw err;
   }
 }
 
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
+async function handleCopyLpPoll(payload: CopyLpPollPayload): Promise<void> {
+  const prisma = getPrisma();
+  const subs = await prisma.copyLpSubscription.findMany({
+    where: {
+      active: true,
+      ...(payload.subscriptionId ? { id: payload.subscriptionId } : {}),
+    },
+  });
+
+  console.log(`[copyLpPoll] checking ${subs.length} subscription(s)`);
+
+  for (const sub of subs) {
+    try {
+      const leaderPositions = await getOpenPositions(sub.leaderWallet);
+      const targetPositions = leaderPositions.positions.filter(
+        (p) => p.poolId === sub.poolId
+      );
+
+      if (targetPositions.length === 0) continue;
+
+      const leaderPos = targetPositions[0]!;
+      const fingerprint = `${leaderPos.lowerBinId}-${leaderPos.upperBinId}`;
+
+      // already mirrored this exact range; skip
+      if (sub.lastMirrorTxId === fingerprint) continue;
+
+      const pool = await getPoolInfo(sub.poolId);
+
+      // 50/50 USD split. Decimal assumptions are heuristics until /token/balance
+      // is wired in to read the pair's real decimals.
+      const halfUsd = sub.capitalUsd / 2;
+      const amountYRaw = Math.floor(halfUsd * 1_000_000).toString();
+      const amountXRaw = Math.floor(
+        (halfUsd / pool.currentPrice) * 1_000_000_000
+      ).toString();
+
+      const st = getSidetrack();
+      const zapTx = await prisma.zapTransaction.create({
+        data: {
+          type: "ZAP_IN",
+          status: "PENDING",
+          walletAddress: sub.followerWallet,
+          poolId: sub.poolId,
+          strategy: sub.strategy,
+          fromBinId: leaderPos.lowerBinId,
+          toBinId: leaderPos.upperBinId,
+          amountX: amountXRaw,
+          amountY: amountYRaw,
+          slippageBps: 100,
+          source: "copylp",
+        },
+      });
+
+      await st.insertJob("executeZapIn", {
+        walletAddress: sub.followerWallet,
+        poolId: sub.poolId,
+        strategy: sub.strategy as ZapStrategy,
+        fromBinId: leaderPos.lowerBinId,
+        toBinId: leaderPos.upperBinId,
+        amountX: amountXRaw,
+        amountY: amountYRaw,
+        slippageBps: 100,
+        zapTransactionId: zapTx.id,
+      });
+
+      await prisma.copyLpSubscription.update({
+        where: { id: sub.id },
+        data: { lastMirroredAt: new Date(), lastMirrorTxId: fingerprint },
+      });
+
+      await prisma.alert.create({
+        data: {
+          walletAddress: sub.followerWallet,
+          positionId: leaderPos.positionId,
+          type: "COPY_TRIGGER",
+          status: "PENDING",
+          message: `Copy-LP: mirroring ${sub.leaderWallet.slice(0, 6)} in ${pool.tokenXSymbol}/${pool.tokenYSymbol} bins ${leaderPos.lowerBinId}-${leaderPos.upperBinId} with $${sub.capitalUsd}.`,
+          metadata: {
+            leaderWallet: sub.leaderWallet,
+            poolId: sub.poolId,
+            fromBinId: leaderPos.lowerBinId,
+            toBinId: leaderPos.upperBinId,
+          },
+        },
+      });
+
+      await notifyWallet(
+        sub.followerWallet,
+        [
+          "*Copy-LP triggered*",
+          "",
+          `Mirroring \`${sub.leaderWallet.slice(0, 6)}...\` in *${pool.tokenXSymbol}/${pool.tokenYSymbol}*`,
+          `Bins ${leaderPos.lowerBinId} -> ${leaderPos.upperBinId}  -  Capital: $${sub.capitalUsd}`,
+          "",
+          "Submitting zap-in now...",
+        ].join("\n"),
+        { kind: "zap" }
+      );
+
+      console.log(
+        `[copyLpPoll] mirror queued for ${sub.followerWallet.slice(0, 6)} -> ${pool.tokenXSymbol}/${pool.tokenYSymbol}`
+      );
+    } catch (err) {
+      console.error(
+        `[copyLpPoll] subscription ${sub.id} failed:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+}
+
+async function handleGenerateInsights(
+  payload: GenerateInsightsPayload
+): Promise<void> {
+  const { walletAddress } = payload;
+  const prisma = getPrisma();
+
+  const open = await getOpenPositions(walletAddress);
+  console.log(
+    `[generateInsights] ${open.positions.length} positions for ${walletAddress.slice(0, 6)}`
+  );
+
+  for (const pos of open.positions) {
+    const health = scorePositionHealth(pos);
+
+    if (health.score < 60) {
+      await prisma.insight.create({
+        data: {
+          walletAddress,
+          poolId: pos.poolId,
+          type: "PORTFOLIO_REBALANCE",
+          severity: health.score < 40 ? "CRITICAL" : "WARNING",
+          title: `Position health low: ${pos.poolName}`,
+          body: health.warnings.join(" - "),
+          data: {
+            positionId: pos.positionId,
+            score: health.score,
+            valueUsd: pos.valueUsd,
+            inRange: pos.inRange,
+          },
+        },
+      });
+    }
+
+    const midBin = (pos.lowerBinId + pos.upperBinId) / 2;
+    const drift = Math.abs(pos.activeBinId - midBin);
+    const range = pos.upperBinId - pos.lowerBinId;
+    if (range > 0 && drift / range > 0.4) {
+      try {
+        const pool = await getPoolInfo(pos.poolId);
+        const pEntry = binToPrice(midBin, pool.binStep);
+        const pNow = pool.currentPrice;
+        const pLower = binToPrice(pos.lowerBinId, pool.binStep);
+        const pUpper = binToPrice(pos.upperBinId, pool.binStep);
+        const il = impermanentLossPct({ pEntry, pNow, pLower, pUpper });
+        if (il < -0.005) {
+          await prisma.insight.create({
+            data: {
+              walletAddress,
+              poolId: pos.poolId,
+              type: "IL_WARNING",
+              severity: il < -0.02 ? "CRITICAL" : "WARNING",
+              title: `IL accumulating in ${pos.poolName}`,
+              body: `Estimated impermanent loss vs HODL: ${(il * 100).toFixed(2)}%. Consider rebalancing.`,
+              data: { ilPct: il, pNow, pEntry, pLower, pUpper },
+            },
+          });
+        }
+      } catch {
+        // pool fetch failed; skip the IL insight for this pos
+      }
+    }
+  }
+
+  const topPools = await prisma.pool.findMany({
+    orderBy: { apr: "desc" },
+    take: 3,
+  });
+  const heldPoolIds = new Set(open.positions.map((p) => p.poolId));
+  for (const pool of topPools) {
+    if (!heldPoolIds.has(pool.poolId) && pool.apr > 50) {
+      await prisma.insight.create({
+        data: {
+          walletAddress,
+          poolId: pool.poolId,
+          type: "POOL_OPPORTUNITY",
+          severity: "INFO",
+          title: `High-APR pool available: ${pool.name}`,
+          body: `${pool.name} is showing ${pool.apr.toFixed(1)}% APR with $${(pool.tvlUsd / 1000).toFixed(0)}k TVL. Consider zap-in.`,
+          data: {
+            poolId: pool.poolId,
+            apr: pool.apr,
+            tvlUsd: pool.tvlUsd,
+          },
+        },
+      });
+    }
+  }
+
+  const criticals = await prisma.insight.findMany({
+    where: { walletAddress, severity: "CRITICAL", acknowledged: false },
+    orderBy: { createdAt: "desc" },
+    take: 3,
+  });
+
+  if (criticals.length > 0) {
+    await notifyWallet(
+      walletAddress,
+      [
+        "*New critical insights*",
+        "",
+        ...criticals.map((c) => `- *${c.title}*\n  ${c.body}`),
+      ].join("\n"),
+      { kind: "insight" }
+    );
+  }
+}
+
+export { getTopLpers };
 
 export async function initSidetrack(): Promise<Sidetrack<AppQueues>> {
   const databaseUrl = process.env["DATABASE_URL"];
-  if (!databaseUrl) throw new Error("DATABASE_URL environment variable is not set");
+  if (!databaseUrl) throw new Error("DATABASE_URL is not set");
 
   await runMigrations(databaseUrl);
 
@@ -486,6 +703,14 @@ export async function initSidetrack(): Promise<Sidetrack<AppQueues>> {
       executeZapIn: {
         maxAttempts: 3,
         run: (payload) => handleExecuteZapIn(payload),
+      },
+      copyLpPoll: {
+        maxAttempts: 3,
+        run: (payload) => handleCopyLpPoll(payload),
+      },
+      generateInsights: {
+        maxAttempts: 3,
+        run: (payload) => handleGenerateInsights(payload),
       },
     },
   });

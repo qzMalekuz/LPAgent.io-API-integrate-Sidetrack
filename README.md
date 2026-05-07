@@ -1,267 +1,264 @@
-# lpagent-sidetrack — LP Position Autopilot
+# LP Copilot
 
-A TypeScript backend that turns [LPAgent.io](https://lpagent.io) data into a fully automated Meteora LP management system. It monitors your DLMM positions, alerts you when they go out of range, and — when autopilot is enabled — automatically **zaps out** using the LP Agent API and can **zap back in** to a better-performing pool.
+Autopilot, alerts, and intelligence for Meteora DLMM positions.
+Powered by [LPAgent.io](https://lpagent.io). Built for the Frontier Hackathon LPAgent.io sidetrack.
 
-Built for the LPAgent.io hackathon track on SuperEarn.
+LP Copilot turns the LP Agent API into a complete LP management product, not just a script. It ships with:
 
----
+- A Telegram bot with inline-button zap controls and live push notifications.
+- A web dashboard (single-page, dark mode, no build step) for portfolio + pool browsing.
+- A range recommender that scores Spot / Curve / BidAsk based on observed volatility.
+- An impermanent-loss calculator for concentrated-liquidity positions.
+- Copy-LP: mirror a top LP's bin range automatically when they zap in.
+- Position autopilot: auto-zap-out when a position drifts out of range.
+- Jito-bundled execution for both zap-in and zap-out.
+- Postgres-persisted job queue ([Sidetrack](https://github.com/sidetrackhq/sidetrack)) that survives restarts and retries on failure.
 
-## What it does
-
-```
-Every 30 min   syncPools        → Discover top Meteora pools via LP Agent, cache in Postgres
-Every  5 min   monitorPositions → Check open positions per wallet, detect out-of-range
-                    ↓ inRange=false
-             [AUTOPILOT_ENABLED=false]   alertOutOfRange  → save Alert record
-             [AUTOPILOT_ENABLED=true ]   executeZapOut    → sign + submit via Jito
-                                              ↓ (manually after reviewing)
-                                         executeZapIn     → re-enter a top-APR pool
-```
+All LP execution flows through LP Agent's Zap-In / Zap-Out endpoints, exactly as the hackathon track requires.
 
 ---
 
-## Stack
+## Why this submission
 
-| Layer | Technology |
+| Hackathon criterion | What's in the box |
 |---|---|
-| Language | TypeScript (strict) |
-| HTTP server | Express 4 |
-| Background jobs | [Sidetrack](https://github.com/sidetrackhq/sidetrack) — Postgres-backed |
-| ORM | Prisma 5 |
-| Database | PostgreSQL |
-| Transaction signing | `@solana/web3.js` |
-| LP data + zaps | **LPAgent.io Open API** |
+| Fulfilment of requirements (40%) | Eight LP Agent endpoints used, including both zap-in and zap-out, all wired through the Jito landing endpoints. |
+| Quality of LP Agent use (20%) | Three independent surfaces (Telegram, web, REST API) all driven by LP Agent data. Real signing flow, retry logic, status state machine, transaction history. |
+| Creativity and UX (30%) | Telegram bot with one-tap zap-out from notifications. Dark dashboard with IL calculator and pool detail view. Copy-LP turns the premium `/top-lpers` endpoint into a real product. |
+| Innovation (10%) | IL math, range recommender, and Copy-LP are not in the API; they're built on top of it. Closed-form IL formula, volatility-scaled range widths, leader-fingerprinted mirror logic. |
+
+---
+
+## Architecture
+
+```
+                      LP COPILOT
+
+  +--------------+   +--------------+   +-----------------------+
+  |  Telegram    |   |  Web dash    |   |  REST API (24 routes) |
+  |  bot (long-  |   |  (Tailwind + |   |  /zap-in /zap-out     |
+  |   polling)   |   |   Alpine)    |   |  /insights /copylp .. |
+  +------+-------+   +------+-------+   +----------+------------+
+         |                  |                      |
+         +---------+--------+----------------------+
+                   |
+                   v
+        +----------------------+
+        |  Sidetrack queue     |  7 queues, cron-scheduled
+        |  (Postgres-backed)   |
+        +----------+-----------+
+                   |
+                   v
+   syncPools  monitorPositions  generateInsights  copyLpPoll
+   alertOutOfRange   executeZapOut   executeZapIn
+                   |
+                   v
+        +----------------------+
+        |   LPAgent.io API     |  /pools/discover  /lp-positions
+        |   (8 endpoints used) |  /position/decrease-tx  ...
+        +----------+-----------+
+                   |
+                   v
+        +----------------------+
+        |  Solana / Jito       |  signed via @solana/web3.js,
+        |  (mainnet)           |  submitted via Jito bundles
+        +----------------------+
+```
+
+---
+
+## LP Agent endpoints used
+
+| Endpoint | Where it's used |
+|---|---|
+| `GET /pools/discover` | Pool browser (web + Telegram), cron sync |
+| `GET /pools/{id}/info` | Pool detail page, range recommender, IL warnings |
+| `GET /pools/{id}/onchain-stats` | Available for volatility-based scoring |
+| `GET /pools/{id}/top-lpers` | Copy-LP feature (uses Premium tier) |
+| `GET /lp-positions/opening` | Position monitor, dashboard portfolio view |
+| `GET /lp-positions/historical` | Closed-position table on dashboard |
+| `GET /lp-positions/overview` | Portfolio header, /portfolio Telegram command |
+| `GET /lp-positions/revenue/{owner}` | Wallet overview endpoint |
+| `GET /token/balance` | Wallet overview endpoint |
+| `POST /position/decrease-quotes` | Quote preview before zap-out |
+| `POST /position/decrease-tx` | Generates unsigned zap-out tx |
+| `POST /position/landing-decrease-tx` | Submits signed zap-out via Jito |
+| `POST /pools/{id}/add-tx` | Generates unsigned zap-in tx |
+| `POST /pools/landing-add-tx` | Submits signed zap-in via Jito |
+
+---
+
+## Demo flow (3 minutes)
+
+1. Open the dashboard at `http://localhost:3000/dashboard/`. Paste a Solana wallet that holds Meteora positions and click Load.
+2. The Portfolio tab shows total value, fees, PnL, and every open position with a health score and warnings (out-of-range, dust, near-edge, low fee yield).
+3. Click Generate insights. Within a few seconds the Insights tab fills with IL warnings, range-rebalance suggestions, and pool-opportunity alerts.
+4. Pools tab, click any pool, see the Smart Range Recommendation (Spot/Curve/BidAsk) with expected days-in-range and rationale, plus the Top LPs leaderboard (premium endpoint).
+5. Click Copy on a top LP, set a $ amount, and that subscription will mirror their next zap-in automatically (poller runs every 2 min).
+6. On Telegram: `/start` then `/link <wallet>` then `/portfolio` then `/positions`, tap Zap out 100% on the inline keyboard. The zap-out tx lands via Jito and you get a Solscan link in your DMs.
+
+---
+
+## Tech stack
+
+| Layer | Tech |
+|---|---|
+| Language | TypeScript (strict mode, `exactOptionalPropertyTypes`) |
+| HTTP | Express 4 (24 routes) |
+| Background jobs | [Sidetrack](https://github.com/sidetrackhq/sidetrack), Postgres-backed queue with cron |
+| ORM | Prisma 5 (7 models) |
+| Database | PostgreSQL (Neon, Supabase, or local) |
+| Solana | `@solana/web3.js` for transaction signing |
+| Telegram | `node-telegram-bot-api` (long-polling, no webhook needed) |
+| Frontend | Single HTML file with Tailwind CDN + Alpine.js (zero build step) |
+| LP data + zaps | LPAgent.io Open API |
 
 ---
 
 ## Setup
 
-### 1. Prerequisites
+### Prereqs
+- Node.js 18 or newer.
+- A PostgreSQL database (Neon free tier works).
+- LP Agent API key from [portal.lpagent.io](https://portal.lpagent.io). DM `@thanhle27` on Telegram for a hackathon Premium key.
+- Optional: Telegram bot token (create with [@BotFather](https://t.me/BotFather)).
 
-- Node.js ≥ 18
-- PostgreSQL instance running
-
-### 2. Install dependencies
+### Install
 
 ```bash
+cd lpagent-sidetrack
 npm install
-```
-
-### 3. Configure environment
-
-```bash
 cp .env.example .env
-```
-
-Required vars:
-
-| Variable | Description |
-|---|---|
-| `DATABASE_URL` | Postgres connection string |
-| `LPAGENT_API_KEY` | From [portal.lpagent.io](https://portal.lpagent.io) (DM @thanhle27 for hackathon key) |
-| `WALLET_PRIVATE_KEY` | Base58 Solana private key for the bot wallet (signing zap txs) |
-
-Optional vars:
-
-| Variable | Default | Description |
-|---|---|---|
-| `MONITOR_WALLETS` | — | Comma-separated wallet pubkeys to monitor |
-| `AUTOPILOT_ENABLED` | `false` | Auto-execute zap-out on out-of-range positions |
-| `PORT` | `3000` | HTTP server port |
-
-### 4. Run database migrations
-
-```bash
-npm run db:migrate     # creates all tables + Sidetrack job tables
-npm run db:generate    # regenerate Prisma client
-```
-
-### 5. Start the server
-
-```bash
-# Development (hot reload)
+# fill in DATABASE_URL, LPAGENT_API_KEY, WALLET_PRIVATE_KEY
+npm run db:migrate
 npm run dev
+```
 
-# Production
-npm run build && npm start
+Open `http://localhost:3000/dashboard/`.
+
+### Environment variables
+
+| Variable | Required | Description |
+|---|---|---|
+| `DATABASE_URL` | yes | Postgres connection string |
+| `LPAGENT_API_KEY` | yes | From portal.lpagent.io |
+| `WALLET_PRIVATE_KEY` | yes (for zaps) | Base58 Solana private key for the bot wallet |
+| `MONITOR_WALLETS` | optional | Comma-separated wallet pubkeys to poll automatically |
+| `AUTOPILOT_ENABLED` | optional | `true` to auto-execute zap-out (default: alert only) |
+| `TELEGRAM_BOT_TOKEN` | optional | From @BotFather. Enables the Telegram bot. |
+| `PORT` | optional | HTTP port (default: 3000) |
+
+### Docker
+
+```bash
+docker build -t lp-copilot .
+docker run -p 3000:3000 --env-file .env lp-copilot
 ```
 
 ---
 
-## Background Queues
+## Telegram commands
 
-### `syncPools` `{ sortBy?, minTvlUsd?, limit? }`
-
-Calls `GET /pools/discover` on LP Agent to find the top Meteora DLMM pools and upserts them into the `Pool` table. Runs on a 30-minute cron.
-
-### `monitorPositions` `{ walletAddress, autoZapOut? }`
-
-Calls `GET /lp-positions/opening` for the wallet, upserts every position into the `Position` table. For each position where `inRange = false`:
-
-- **`AUTOPILOT_ENABLED=false`** → enqueues `alertOutOfRange` (creates an Alert record)
-- **`AUTOPILOT_ENABLED=true`** → enqueues `executeZapOut` (auto-closes the position)
-
-Runs on a 5-minute cron per configured wallet.
-
-### `alertOutOfRange` `{ walletAddress, positionId, poolName }`
-
-Creates a `PENDING` alert in the `Alert` table so you can review out-of-range positions and decide whether to manually zap out/in.
-
-### `executeZapOut` `{ walletAddress, positionId, bps?, output?, slippageBps? }`
-
-Full zap-out flow using LP Agent:
-1. `POST /position/decrease-quotes` — fetch quote & estimated value
-2. `POST /position/decrease-tx` — generate unsigned transaction
-3. Sign with bot wallet (`@solana/web3.js`)
-4. `POST /position/landing-decrease-tx` — submit via Jito bundle
-5. Update `ZapTransaction` status through PENDING → SIGNED → SUBMITTED → CONFIRMED
-
-### `executeZapIn` `{ walletAddress, poolId, strategy, fromBinId, toBinId, amountX?, amountY?, slippageBps? }`
-
-Full zap-in flow:
-1. `POST /pools/{poolId}/add-tx` — generate unsigned transaction
-2. Sign with bot wallet
-3. `POST /pools/landing-add-tx` — submit via Jito bundle
-4. Update `ZapTransaction` status
-
----
-
-## HTTP API
-
-### `POST /sync-pools`
-Immediately trigger a pool discovery sync.
-
-```bash
-curl -X POST http://localhost:3000/sync-pools \
-  -H "Content-Type: application/json" \
-  -d '{"sortBy": "apr", "minTvlUsd": 50000, "limit": 50}'
-```
-
-### `POST /monitor`
-Immediately check positions for a wallet.
-
-```bash
-curl -X POST http://localhost:3000/monitor \
-  -H "Content-Type: application/json" \
-  -d '{"walletAddress": "YourSolanaWallet", "autoZapOut": false}'
-```
-
-### `POST /zap-out`
-Manually zap out of a position.
-
-```bash
-curl -X POST http://localhost:3000/zap-out \
-  -H "Content-Type: application/json" \
-  -d '{
-    "walletAddress": "YourSolanaWallet",
-    "positionId": "PositionPubkey",
-    "bps": 10000,
-    "output": "both",
-    "slippageBps": 50
-  }'
-```
-
-`output` options: `allToken0` | `allToken1` | `both` | `allBaseToken`
-
-### `POST /zap-in`
-Manually zap into a pool.
-
-```bash
-curl -X POST http://localhost:3000/zap-in \
-  -H "Content-Type: application/json" \
-  -d '{
-    "walletAddress": "YourSolanaWallet",
-    "poolId": "MeteoraDLMMPoolAddress",
-    "strategy": "Spot",
-    "fromBinId": 8450,
-    "toBinId": 8550,
-    "amountX": "1000000",
-    "slippageBps": 50
-  }'
-```
-
-`strategy` options: `Spot` | `Curve` | `BidAsk`
-
-### `GET /alerts`
-List alerts.
-
-```bash
-# All pending alerts
-curl "http://localhost:3000/alerts?status=PENDING"
-
-# For a specific wallet
-curl "http://localhost:3000/alerts?walletAddress=YourWallet&limit=20"
-```
-
-### `PATCH /alerts/:id`
-Acknowledge or resolve an alert.
-
-```bash
-curl -X PATCH http://localhost:3000/alerts/<id> \
-  -H "Content-Type: application/json" \
-  -d '{"status": "ACKNOWLEDGED"}'
-```
-
-### `GET /transactions`
-List all zap transactions with status.
-
-```bash
-curl "http://localhost:3000/transactions?walletAddress=YourWallet&status=CONFIRMED"
-```
-
-### `GET /pools`
-Browse cached pool data.
-
-```bash
-curl "http://localhost:3000/pools?sortBy=apr&limit=10"
-```
-
-### `GET /positions`
-Browse cached position data for a wallet.
-
-```bash
-curl "http://localhost:3000/positions?walletAddress=YourWallet&inRange=false"
-```
-
----
-
-## Database Schema
-
-```
-Pool             — Meteora DLMM pools discovered via /pools/discover
-Position         — LP positions per wallet (updated every 5 min)
-ZapTransaction   — Record of every zap-in / zap-out attempt with status + tx sig
-Alert            — Out-of-range notifications (PENDING → ACKNOWLEDGED → RESOLVED)
-```
-
----
-
-## Project Structure
-
-```
-src/
-  index.ts      — Express app, cron scheduling, graceful shutdown
-  sidetrack.ts  — Sidetrack worker instance + all 5 queue handlers
-  lpagent.ts    — Typed HTTP client for every LPAgent.io endpoint
-  wallet.ts     — Solana tx signing via @solana/web3.js
-  db.ts         — Singleton PrismaClient
-prisma/
-  schema.prisma — Pool, Position, ZapTransaction, Alert models
-.env.example
-```
-
----
-
-## LP Agent Endpoints Used
-
-| Endpoint | Used by |
+| Command | What it does |
 |---|---|
-| `GET /pools/discover` | `syncPools` queue |
-| `GET /lp-positions/opening` | `monitorPositions` queue |
-| `GET /lp-positions/historical` | `lpagent.getHistoricalPositions()` |
-| `GET /lp-positions/overview` | `lpagent.getPositionOverview()` |
-| `POST /position/decrease-quotes` | `executeZapOut` queue |
-| `POST /position/decrease-tx` | `executeZapOut` queue ✅ **required** |
-| `POST /position/landing-decrease-tx` | `executeZapOut` queue ✅ **required** |
-| `POST /pools/{poolId}/add-tx` | `executeZapIn` queue ✅ **required** |
-| `POST /pools/landing-add-tx` | `executeZapIn` queue ✅ **required** |
+| `/start` | Show welcome menu |
+| `/link <wallet>` | Link your Solana wallet to this chat |
+| `/portfolio` | Total value, fees, PnL, in-range count |
+| `/positions` | List open positions with inline zap-out buttons |
+| `/pools [tvl\|apr\|volume]` | Top Meteora pools |
+| `/recommend <poolId>` | Smart bin-range and strategy recommendation |
+| `/leaders <poolId>` | Top LPs in a pool (premium) |
+| `/copy <leader> <pool> <usd>` | Mirror a top LP with $X capital |
+| `/unlink` | Remove the wallet binding |
+
+You also get push notifications when:
+- A position goes out of range
+- A zap-in or zap-out is confirmed (with Solscan link)
+- A critical insight is generated (high IL, fee velocity drop, opportunity)
+- A Copy-LP subscription triggers a mirror zap
+
+---
+
+## REST API
+
+All routes live on the same Express server as the dashboard.
+
+### Wallet and portfolio
+- `GET /health`
+- `GET /wallet/:address/overview`
+- `GET /positions?walletAddress=...&inRange=true|false`
+- `GET /transactions?walletAddress=...`
+- `GET /alerts?walletAddress=...&status=PENDING`
+- `PATCH /alerts/:id`  body: `{ status: "ACKNOWLEDGED" | "RESOLVED" }`
+
+### Pools and intelligence
+- `GET /discover?sortBy=apr&minTvl=10000&limit=20`
+- `GET /pools?sortBy=apr|tvl|volume&limit=20`
+- `GET /pool/:poolId/info`
+- `GET /pool/:poolId/recommend?vol=0.6&preference=balanced`
+- `GET /pool/:poolId/leaders` (premium)
+- `POST /intelligence/il`  body: `{ pEntry, pNow, pLower, pUpper }`
+
+### Zap execution
+- `POST /zap-in`  body: `{ walletAddress, poolId, strategy, fromBinId, toBinId, amountX|amountY, slippageBps }`
+- `POST /zap-out`  body: `{ walletAddress, positionId, bps, output, slippageBps }`
+- `POST /sync-pools`
+- `POST /monitor`
+
+### Insights and Copy-LP
+- `GET /insights?walletAddress=...`
+- `POST /insights/generate`
+- `POST /copylp`  body: `{ followerWallet, leaderWallet, poolId, capitalUsd, strategy }`
+- `GET /copylp?followerWallet=...`
+- `DELETE /copylp/:id`
+- `POST /copylp/poll`
+
+---
+
+## Background queues
+
+| Queue | Schedule | Purpose |
+|---|---|---|
+| `syncPools` | every 30 min | Cache top 100 pools by TVL |
+| `monitorPositions` | every 5 min, per wallet | Detect out-of-range, queue alerts/zaps |
+| `generateInsights` | every 15 min, per wallet | Score positions, detect IL, surface opportunities |
+| `copyLpPoll` | every 2 min | Check leader wallets, mirror new positions |
+| `alertOutOfRange` | on demand | Save alert, push to Telegram |
+| `executeZapOut` | on demand | Quote, generate, sign, Jito submit |
+| `executeZapIn` | on demand | Generate, sign, Jito submit |
+
+All queues persist in Postgres, retry on failure, and survive restarts.
+
+---
+
+## File map
+
+```
+lpagent-sidetrack/
+  src/
+    index.ts          24 HTTP routes + dashboard static + cron setup
+    sidetrack.ts      7 queue handlers + cron registration
+    lpagent.ts        Typed client for 14 LP Agent endpoints
+    telegram.ts       Bot commands + inline keyboards + notifications
+    intelligence.ts   IL math, volatility, range/strategy recommender
+    wallet.ts         Solana keypair loading + tx signing
+    db.ts             Prisma singleton
+  prisma/
+    schema.prisma     7 models: Pool, Position, ZapTransaction, Alert,
+                      TelegramUser, CopyLpSubscription, Insight
+    migrations/       Baseline migration SQL
+  public/
+    index.html        Single-file dashboard (Tailwind + Alpine)
+  Dockerfile
+  .env.example
+```
+
+---
+
+## Hackathon submission
+
+- Track: LPAgent.io / API integrate Sidetrack
+- Both Zap-In and Zap-Out: implemented end-to-end, signed locally, submitted via Jito.
+- 8 LP Agent endpoints in use, including the Premium `top-lpers` for Copy-LP.
+- Three user surfaces: Telegram bot, web dashboard, REST API.
+- Production-ready: Dockerfile, Postgres migrations, retry logic, graceful shutdown.

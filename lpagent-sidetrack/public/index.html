@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LP Copilot</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    body { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    .glow { box-shadow: 0 0 30px -8px rgba(34, 211, 238, 0.4); }
+    .glow-red { box-shadow: 0 0 30px -8px rgba(239, 68, 68, 0.4); }
+    @keyframes pulse-soft {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+    .pulse-soft { animation: pulse-soft 2s ease-in-out infinite; }
+    .bg-grid {
+      background-image:
+        linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+    .gradient-text {
+      background: linear-gradient(120deg, #22d3ee 0%, #a855f7 50%, #22d3ee 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      background-size: 200% auto;
+      animation: shimmer 4s linear infinite;
+    }
+    @keyframes shimmer {
+      to { background-position: 200% center; }
+    }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.01) 100%);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    [x-cloak] { display: none !important; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen bg-grid">
+  <div x-data="dashboard()" x-init="init()" class="max-w-7xl mx-auto p-4 md:p-8">
+
+    <header class="flex flex-col md:flex-row md:items-center md:justify-between mb-8 gap-4">
+      <div>
+        <h1 class="text-3xl md:text-4xl font-bold gradient-text">LP Copilot</h1>
+        <p class="text-slate-400 text-sm mt-1">
+          Meteora DLMM autopilot. Powered by
+          <a href="https://lpagent.io" target="_blank" class="text-cyan-400 hover:text-cyan-300 underline">LPAgent.io</a>.
+        </p>
+      </div>
+      <div class="flex items-center gap-2">
+        <input
+          x-model="walletInput"
+          @keydown.enter="loadWallet()"
+          placeholder="Solana wallet pubkey..."
+          class="mono bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm w-full md:w-96 focus:outline-none focus:border-cyan-500"
+        />
+        <button
+          @click="loadWallet()"
+          class="bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-semibold px-4 py-2 rounded-lg text-sm whitespace-nowrap"
+        >Load</button>
+      </div>
+    </header>
+
+    <div class="flex flex-wrap items-center gap-2 mb-6 text-xs text-slate-400" x-show="health">
+      <span class="px-2 py-1 rounded bg-slate-900 border border-slate-800">
+        <span class="text-slate-500">Bot:</span>
+        <span :class="health?.ok ? 'text-emerald-400' : 'text-red-400'" x-text="health?.ok ? 'ONLINE' : 'OFFLINE'"></span>
+      </span>
+      <span class="px-2 py-1 rounded bg-slate-900 border border-slate-800">
+        <span class="text-slate-500">Telegram:</span>
+        <span :class="health?.telegram ? 'text-emerald-400' : 'text-slate-600'" x-text="health?.telegram ? 'CONNECTED' : 'OFFLINE'"></span>
+      </span>
+      <span class="px-2 py-1 rounded bg-slate-900 border border-slate-800">
+        <span class="text-slate-500">Autopilot:</span>
+        <span :class="health?.autopilot ? 'text-emerald-400' : 'text-amber-400'" x-text="health?.autopilot ? 'ACTIVE' : 'ALERT-ONLY'"></span>
+      </span>
+      <span class="px-2 py-1 rounded bg-slate-900 border border-slate-800">
+        <span class="text-slate-500">Watching:</span>
+        <span class="text-cyan-300 mono" x-text="health?.monitoredWallets ?? 0"></span>
+        wallets
+      </span>
+    </div>
+
+    <nav class="flex gap-1 mb-6 border-b border-slate-800 overflow-x-auto">
+      <template x-for="t in tabs" :key="t.id">
+        <button
+          @click="tab = t.id"
+          :class="tab === t.id ? 'text-cyan-400 border-cyan-400' : 'text-slate-400 border-transparent hover:text-slate-200'"
+          class="px-4 py-3 text-sm font-medium border-b-2 transition whitespace-nowrap"
+          x-text="t.label"
+        ></button>
+      </template>
+    </nav>
+
+    <section x-show="tab === 'portfolio'" x-cloak>
+      <template x-if="!wallet">
+        <div class="card rounded-xl p-12 text-center">
+          <p class="text-slate-400">Enter a wallet pubkey above to load your portfolio.</p>
+          <p class="text-xs text-slate-500 mt-2 mono">Try: 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU</p>
+        </div>
+      </template>
+
+      <template x-if="wallet && loading">
+        <div class="card rounded-xl p-12 text-center pulse-soft">
+          <p class="text-slate-400">Loading portfolio from LP Agent...</p>
+        </div>
+      </template>
+
+      <template x-if="wallet && !loading && overview">
+        <div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+            <div class="card rounded-xl p-5">
+              <div class="text-xs text-slate-400 uppercase tracking-wider">Total Value</div>
+              <div class="text-2xl font-bold mt-2 mono" x-text="'$' + (overview.totalValueUsd ?? 0).toFixed(2)"></div>
+            </div>
+            <div class="card rounded-xl p-5">
+              <div class="text-xs text-slate-400 uppercase tracking-wider">Fees Earned</div>
+              <div class="text-2xl font-bold mt-2 mono text-emerald-400" x-text="'$' + (overview.totalFeesEarnedUsd ?? 0).toFixed(2)"></div>
+            </div>
+            <div class="card rounded-xl p-5">
+              <div class="text-xs text-slate-400 uppercase tracking-wider">PnL</div>
+              <div class="text-2xl font-bold mt-2 mono"
+                :class="(overview.totalPnlUsd ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'"
+                x-text="((overview.totalPnlUsd ?? 0) >= 0 ? '+$' : '-$') + Math.abs(overview.totalPnlUsd ?? 0).toFixed(2)"
+              ></div>
+            </div>
+            <div class="card rounded-xl p-5">
+              <div class="text-xs text-slate-400 uppercase tracking-wider">Positions</div>
+              <div class="text-2xl font-bold mt-2 mono">
+                <span x-text="overview.openPositionCount ?? 0"></span>
+                <span class="text-xs text-slate-400 font-normal ml-1">
+                  (<span class="text-emerald-400" x-text="overview.inRangeCount ?? 0"></span>
+                  / <span class="text-red-400" x-text="overview.outOfRangeCount ?? 0"></span>)
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <h2 class="text-lg font-semibold mb-3 flex items-center gap-2">
+            Open Positions
+            <span class="text-xs text-slate-400 font-normal" x-text="'(' + positions.length + ')'"></span>
+            <button @click="generateInsights()" class="ml-auto text-xs bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 px-3 py-1 rounded-lg border border-purple-500/30">
+              Generate insights
+            </button>
+          </h2>
+          <div class="space-y-3">
+            <template x-for="pos in positions" :key="pos.positionId">
+              <div class="card rounded-xl p-5"
+                :class="pos.inRange ? '' : 'glow-red border-red-500/30'">
+                <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                  <div class="flex-1">
+                    <div class="flex items-center gap-3 mb-1">
+                      <span class="font-semibold" x-text="pos.tokenXSymbol + '/' + pos.tokenYSymbol"></span>
+                      <span class="text-xs px-2 py-0.5 rounded-full"
+                        :class="pos.inRange ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300 pulse-soft'"
+                        x-text="pos.inRange ? 'in range' : 'OUT'"></span>
+                      <span class="text-xs text-slate-500 mono" x-text="'health ' + (pos.health?.score ?? '?') + '/100'"></span>
+                    </div>
+                    <div class="text-xs text-slate-500 mono" x-text="pos.poolName + ' / ' + pos.positionId.slice(0,8) + '...'"></div>
+                    <div class="text-xs text-slate-400 mt-1">
+                      Bins <span class="mono" x-text="pos.lowerBinId"></span>
+                      to <span class="mono" x-text="pos.upperBinId"></span>
+                      (active: <span class="mono" :class="pos.inRange ? 'text-emerald-400' : 'text-red-400'" x-text="pos.activeBinId"></span>)
+                    </div>
+                    <template x-if="pos.health?.warnings?.length > 0">
+                      <ul class="mt-2 text-xs text-amber-400 space-y-0.5">
+                        <template x-for="w in pos.health.warnings" :key="w">
+                          <li>- <span x-text="w"></span></li>
+                        </template>
+                      </ul>
+                    </template>
+                  </div>
+                  <div class="flex flex-col md:items-end gap-2">
+                    <div class="text-right">
+                      <div class="mono font-semibold" x-text="'$' + pos.valueUsd.toFixed(2)"></div>
+                      <div class="text-xs text-emerald-400 mono" x-text="'+$' + pos.feesEarnedUsd.toFixed(2) + ' fees'"></div>
+                    </div>
+                    <div class="flex gap-2">
+                      <button @click="zapOut(pos.positionId, 5000)" class="text-xs bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 px-3 py-1.5 rounded-lg border border-amber-500/30">
+                        Zap 50%
+                      </button>
+                      <button @click="zapOut(pos.positionId, 10000)" class="text-xs bg-red-500/20 hover:bg-red-500/30 text-red-300 px-3 py-1.5 rounded-lg border border-red-500/30">
+                        Zap 100%
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+            <template x-if="positions.length === 0">
+              <div class="card rounded-xl p-8 text-center text-slate-500">No open positions.</div>
+            </template>
+          </div>
+
+          <template x-if="history.length > 0">
+            <div class="mt-8">
+              <h2 class="text-lg font-semibold mb-3">Closed positions</h2>
+              <div class="card rounded-xl overflow-hidden">
+                <table class="w-full text-sm">
+                  <thead class="bg-slate-900/50 text-slate-400 text-xs uppercase tracking-wider">
+                    <tr>
+                      <th class="text-left p-3">Pool</th>
+                      <th class="text-right p-3">Value</th>
+                      <th class="text-right p-3">Fees</th>
+                      <th class="text-right p-3">PnL</th>
+                      <th class="text-right p-3">Days</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="h in history.slice(0,10)" :key="h.positionId">
+                      <tr class="border-t border-slate-800">
+                        <td class="p-3" x-text="h.tokenXSymbol + '/' + h.tokenYSymbol"></td>
+                        <td class="p-3 text-right mono" x-text="'$' + h.valueUsd.toFixed(2)"></td>
+                        <td class="p-3 text-right mono text-emerald-400" x-text="'+$' + h.feesEarnedUsd.toFixed(2)"></td>
+                        <td class="p-3 text-right mono" :class="h.pnlUsd >= 0 ? 'text-emerald-400' : 'text-red-400'"
+                          x-text="(h.pnlUsd >= 0 ? '+$' : '-$') + Math.abs(h.pnlUsd).toFixed(2)"></td>
+                        <td class="p-3 text-right mono text-slate-400" x-text="h.holdingPeriodDays.toFixed(1)"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
+    </section>
+
+    <section x-show="tab === 'pools'" x-cloak>
+      <div class="flex gap-2 mb-4">
+        <button @click="loadPools('apr')"
+          :class="poolSort === 'apr' ? 'bg-cyan-500 text-slate-900' : 'bg-slate-900 text-slate-400'"
+          class="px-3 py-1.5 rounded-lg text-xs font-semibold">APR</button>
+        <button @click="loadPools('tvl')"
+          :class="poolSort === 'tvl' ? 'bg-cyan-500 text-slate-900' : 'bg-slate-900 text-slate-400'"
+          class="px-3 py-1.5 rounded-lg text-xs font-semibold">TVL</button>
+        <button @click="loadPools('volume')"
+          :class="poolSort === 'volume' ? 'bg-cyan-500 text-slate-900' : 'bg-slate-900 text-slate-400'"
+          class="px-3 py-1.5 rounded-lg text-xs font-semibold">Volume</button>
+      </div>
+      <div class="grid md:grid-cols-2 gap-4">
+        <template x-for="p in pools" :key="p.poolId">
+          <div class="card rounded-xl p-5 hover:border-cyan-500/30 cursor-pointer" @click="openPool(p.poolId)">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-semibold text-lg" x-text="p.tokenXSymbol + '/' + p.tokenYSymbol"></span>
+              <span class="text-xs px-2 py-1 rounded bg-emerald-500/20 text-emerald-300 mono" x-text="p.apr.toFixed(1) + '% APR'"></span>
+            </div>
+            <div class="grid grid-cols-2 gap-2 text-sm">
+              <div>
+                <div class="text-xs text-slate-500">TVL</div>
+                <div class="mono" x-text="'$' + (p.tvlUsd / 1000).toFixed(1) + 'k'"></div>
+              </div>
+              <div>
+                <div class="text-xs text-slate-500">24h Volume</div>
+                <div class="mono" x-text="'$' + (p.volume24hUsd / 1000).toFixed(1) + 'k'"></div>
+              </div>
+            </div>
+            <div class="mt-3 text-xs text-slate-500 mono truncate" x-text="p.poolId"></div>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <section x-show="tab === 'pool-detail' && poolDetail" x-cloak>
+      <button @click="tab = 'pools'" class="text-xs text-slate-400 hover:text-cyan-400 mb-4">back to pools</button>
+      <template x-if="poolDetail">
+        <div>
+          <div class="card rounded-xl p-6 mb-6">
+            <div class="flex items-center justify-between mb-4">
+              <div>
+                <h2 class="text-2xl font-bold" x-text="poolDetail.pool.tokenXSymbol + '/' + poolDetail.pool.tokenYSymbol"></h2>
+                <div class="text-xs text-slate-500 mono mt-1" x-text="poolDetail.pool.poolId"></div>
+              </div>
+              <div class="text-right">
+                <div class="text-3xl font-bold text-emerald-400 mono" x-text="poolDetail.pool.apr.toFixed(1) + '%'"></div>
+                <div class="text-xs text-slate-500">APR</div>
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-4 text-sm">
+              <div>
+                <div class="text-xs text-slate-500">TVL</div>
+                <div class="mono" x-text="'$' + poolDetail.pool.tvlUsd.toFixed(0)"></div>
+              </div>
+              <div>
+                <div class="text-xs text-slate-500">24h Volume</div>
+                <div class="mono" x-text="'$' + poolDetail.pool.volume24hUsd.toFixed(0)"></div>
+              </div>
+              <div>
+                <div class="text-xs text-slate-500">Bin Step</div>
+                <div class="mono" x-text="poolDetail.pool.binStep + ' bps'"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card rounded-xl p-6 mb-6 glow border-cyan-500/30">
+            <div class="flex items-center gap-2 mb-3">
+              <h3 class="text-lg font-semibold gradient-text">Smart range recommendation</h3>
+            </div>
+            <div class="grid md:grid-cols-3 gap-4 mb-4">
+              <div>
+                <div class="text-xs text-slate-500">Strategy</div>
+                <div class="text-xl font-bold text-cyan-400" x-text="poolDetail.recommendation.strategy"></div>
+              </div>
+              <div>
+                <div class="text-xs text-slate-500">Bin Range</div>
+                <div class="mono" x-text="poolDetail.recommendation.fromBinId + ' to ' + poolDetail.recommendation.toBinId"></div>
+              </div>
+              <div>
+                <div class="text-xs text-slate-500">Expected time-in-range</div>
+                <div class="mono" x-text="'~' + poolDetail.recommendation.expectedTimeInRangeDays.toFixed(1) + ' days'"></div>
+              </div>
+            </div>
+            <p class="text-xs text-slate-400 italic" x-text="poolDetail.recommendation.rationale"></p>
+          </div>
+
+          <div class="card rounded-xl p-6">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-lg font-semibold">Top LPs <span class="text-xs text-amber-400 ml-2">premium</span></h3>
+              <button @click="loadLeaders(poolDetail.pool.poolId)" class="text-xs text-cyan-400 hover:text-cyan-300">refresh</button>
+            </div>
+            <template x-if="!leaders">
+              <p class="text-xs text-slate-500">Click refresh to load top LPs (requires Premium API key).</p>
+            </template>
+            <template x-if="leaders && leaders.lpers">
+              <div class="space-y-2">
+                <template x-for="(l, i) in leaders.lpers.slice(0, 8)" :key="l.walletAddress">
+                  <div class="flex items-center justify-between p-2 rounded bg-slate-900/50">
+                    <div class="flex items-center gap-3">
+                      <span class="text-amber-400 mono w-6" x-text="'#' + (i + 1)"></span>
+                      <span class="mono text-xs" x-text="l.walletAddress.slice(0,6) + '...' + l.walletAddress.slice(-4)"></span>
+                    </div>
+                    <div class="flex items-center gap-4">
+                      <span class="text-xs text-slate-400 mono" x-text="'$' + l.totalValueUsd.toFixed(0)"></span>
+                      <span class="text-xs text-emerald-400 mono" x-text="'+$' + l.feesEarnedUsd.toFixed(2)"></span>
+                      <button @click="copyLpModal(l.walletAddress, poolDetail.pool.poolId)" class="text-xs bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 px-2 py-1 rounded">
+                        Copy
+                      </button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+    </section>
+
+    <section x-show="tab === 'insights'" x-cloak>
+      <div class="flex justify-between items-center mb-4">
+        <h2 class="text-lg font-semibold">Insights</h2>
+        <button @click="loadInsights()" class="text-xs text-cyan-400 hover:text-cyan-300">refresh</button>
+      </div>
+      <div class="space-y-3">
+        <template x-for="ins in insights" :key="ins.id">
+          <div class="card rounded-xl p-5"
+            :class="ins.severity === 'CRITICAL' ? 'border-red-500/30 glow-red' : ins.severity === 'WARNING' ? 'border-amber-500/30' : ''">
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-xs px-2 py-0.5 rounded-full"
+                :class="{
+                  'bg-red-500/20 text-red-300': ins.severity === 'CRITICAL',
+                  'bg-amber-500/20 text-amber-300': ins.severity === 'WARNING',
+                  'bg-cyan-500/20 text-cyan-300': ins.severity === 'INFO'
+                }"
+                x-text="ins.severity"></span>
+              <span class="text-xs text-slate-500" x-text="ins.type.replace(/_/g, ' ').toLowerCase()"></span>
+              <span class="text-xs text-slate-600 ml-auto" x-text="new Date(ins.createdAt).toLocaleString()"></span>
+            </div>
+            <div class="font-semibold mb-1" x-text="ins.title"></div>
+            <div class="text-sm text-slate-300" x-text="ins.body"></div>
+          </div>
+        </template>
+        <template x-if="insights.length === 0">
+          <div class="card rounded-xl p-8 text-center text-slate-500">
+            No insights yet. Load a wallet and click "Generate insights" on the portfolio tab.
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <section x-show="tab === 'transactions'" x-cloak>
+      <h2 class="text-lg font-semibold mb-4">Zap transactions</h2>
+      <div class="card rounded-xl overflow-hidden">
+        <table class="w-full text-sm">
+          <thead class="bg-slate-900/50 text-slate-400 text-xs uppercase tracking-wider">
+            <tr>
+              <th class="text-left p-3">Type</th>
+              <th class="text-left p-3">Pool</th>
+              <th class="text-left p-3">Status</th>
+              <th class="text-left p-3">Source</th>
+              <th class="text-right p-3">Value</th>
+              <th class="text-left p-3">Tx</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="t in transactions" :key="t.id">
+              <tr class="border-t border-slate-800">
+                <td class="p-3">
+                  <span class="text-xs px-2 py-0.5 rounded"
+                    :class="t.type === 'ZAP_IN' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'"
+                    x-text="t.type"></span>
+                </td>
+                <td class="p-3 text-xs" x-text="t.pool ? (t.pool.tokenXSymbol + '/' + t.pool.tokenYSymbol) : '-'"></td>
+                <td class="p-3">
+                  <span class="text-xs px-2 py-0.5 rounded"
+                    :class="{
+                      'bg-emerald-500/20 text-emerald-300': t.status === 'CONFIRMED',
+                      'bg-red-500/20 text-red-300': t.status === 'FAILED',
+                      'bg-slate-700 text-slate-300': ['PENDING', 'SIGNED', 'SUBMITTED'].includes(t.status)
+                    }"
+                    x-text="t.status"></span>
+                </td>
+                <td class="p-3 text-xs text-slate-400" x-text="t.source ?? 'api'"></td>
+                <td class="p-3 text-right mono text-xs" x-text="t.estimatedValueUsd ? '$' + t.estimatedValueUsd.toFixed(2) : '-'"></td>
+                <td class="p-3">
+                  <a x-show="t.txSignature" :href="'https://solscan.io/tx/' + t.txSignature" target="_blank"
+                     class="text-cyan-400 hover:text-cyan-300 mono text-xs"
+                     x-text="t.txSignature ? t.txSignature.slice(0, 8) + '...' : ''"></a>
+                </td>
+              </tr>
+            </template>
+            <template x-if="transactions.length === 0">
+              <tr><td colspan="6" class="p-8 text-center text-slate-500">No transactions yet.</td></tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section x-show="tab === 'il'" x-cloak>
+      <h2 class="text-lg font-semibold mb-4">Impermanent loss calculator</h2>
+      <div class="card rounded-xl p-6">
+        <p class="text-sm text-slate-400 mb-4">
+          Simulate IL for a concentrated-liquidity position. Enter your entry price, current price, and bin range bounds.
+        </p>
+        <div class="grid md:grid-cols-2 gap-4 mb-4">
+          <label class="block">
+            <span class="text-xs text-slate-400">Entry price</span>
+            <input type="number" step="any" x-model.number="il.pEntry" class="mono w-full mt-1 bg-slate-900 border border-slate-700 rounded px-3 py-2" />
+          </label>
+          <label class="block">
+            <span class="text-xs text-slate-400">Current price</span>
+            <input type="number" step="any" x-model.number="il.pNow" class="mono w-full mt-1 bg-slate-900 border border-slate-700 rounded px-3 py-2" />
+          </label>
+          <label class="block">
+            <span class="text-xs text-slate-400">Lower bound</span>
+            <input type="number" step="any" x-model.number="il.pLower" class="mono w-full mt-1 bg-slate-900 border border-slate-700 rounded px-3 py-2" />
+          </label>
+          <label class="block">
+            <span class="text-xs text-slate-400">Upper bound</span>
+            <input type="number" step="any" x-model.number="il.pUpper" class="mono w-full mt-1 bg-slate-900 border border-slate-700 rounded px-3 py-2" />
+          </label>
+        </div>
+        <button @click="calcIL()" class="bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-semibold px-4 py-2 rounded-lg text-sm">
+          Calculate IL
+        </button>
+        <template x-if="il.result !== null">
+          <div class="mt-6 p-4 rounded-lg" :class="il.result < -0.01 ? 'bg-red-500/10 border border-red-500/30' : 'bg-emerald-500/10 border border-emerald-500/30'">
+            <div class="text-xs text-slate-400">Impermanent loss vs HODL</div>
+            <div class="text-3xl font-bold mono mt-1" :class="il.result < 0 ? 'text-red-400' : 'text-emerald-400'"
+              x-text="(il.result * 100).toFixed(3) + '%'"></div>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <section x-show="tab === 'copylp'" x-cloak>
+      <h2 class="text-lg font-semibold mb-4">Copy-LP subscriptions</h2>
+      <div class="card rounded-xl p-6 mb-4">
+        <p class="text-sm text-slate-400 mb-4">
+          Mirror a top LP's bin range automatically. When they zap into a pool, we deploy your capital into the same range.
+        </p>
+        <div class="grid md:grid-cols-4 gap-3">
+          <input x-model="newCopy.followerWallet" placeholder="Your wallet" class="mono bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm" />
+          <input x-model="newCopy.leaderWallet" placeholder="Leader wallet" class="mono bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm" />
+          <input x-model="newCopy.poolId" placeholder="Pool ID" class="mono bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm" />
+          <div class="flex gap-2">
+            <input type="number" x-model.number="newCopy.capitalUsd" placeholder="USD" class="mono bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm w-full" />
+            <button @click="addCopy()" class="bg-purple-500 hover:bg-purple-400 text-white font-semibold px-3 py-2 rounded text-sm whitespace-nowrap">Add</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="space-y-2">
+        <template x-for="s in copies" :key="s.id">
+          <div class="card rounded-xl p-4 flex items-center justify-between">
+            <div class="text-sm">
+              <div class="font-semibold">
+                <span class="mono" x-text="s.followerWallet.slice(0, 6) + '...'"></span>
+                copies
+                <span class="mono text-purple-300" x-text="s.leaderWallet.slice(0, 6) + '...'"></span>
+              </div>
+              <div class="text-xs text-slate-400 mt-1">
+                Pool <span class="mono" x-text="s.poolId.slice(0, 8) + '...'"></span>
+                / <span class="text-cyan-400 mono" x-text="'$' + s.capitalUsd"></span>
+                / strategy <span x-text="s.strategy"></span>
+              </div>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="text-xs px-2 py-0.5 rounded"
+                :class="s.active ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-700 text-slate-400'"
+                x-text="s.active ? 'ACTIVE' : 'PAUSED'"></span>
+              <button x-show="s.active" @click="cancelCopy(s.id)" class="text-xs text-red-400 hover:text-red-300">cancel</button>
+            </div>
+          </div>
+        </template>
+        <template x-if="copies.length === 0">
+          <div class="card rounded-xl p-8 text-center text-slate-500">No active copy-LP subscriptions.</div>
+        </template>
+      </div>
+    </section>
+
+    <footer class="mt-12 pt-6 border-t border-slate-900 text-center text-xs text-slate-600">
+      <div>Built for the LPAgent.io hackathon track on SuperEarn / Frontier 2026</div>
+      <div class="mt-1">
+        Powered by
+        <a href="https://docs.lpagent.io" target="_blank" class="text-cyan-500 hover:text-cyan-400">LPAgent.io API</a>
+      </div>
+    </footer>
+
+    <div x-show="toast" x-cloak x-transition
+      class="fixed bottom-6 right-6 bg-slate-800 border border-cyan-500/30 px-4 py-3 rounded-lg shadow-lg text-sm">
+      <span x-text="toast"></span>
+    </div>
+  </div>
+
+  <script>
+    function dashboard() {
+      return {
+        tabs: [
+          { id: 'portfolio', label: 'Portfolio' },
+          { id: 'pools', label: 'Pools' },
+          { id: 'pool-detail', label: 'Pool details' },
+          { id: 'insights', label: 'Insights' },
+          { id: 'transactions', label: 'Transactions' },
+          { id: 'il', label: 'IL calculator' },
+          { id: 'copylp', label: 'Copy-LP' },
+        ],
+        tab: 'portfolio',
+        wallet: '',
+        walletInput: '',
+        loading: false,
+        overview: null,
+        positions: [],
+        history: [],
+        pools: [],
+        poolSort: 'apr',
+        poolDetail: null,
+        leaders: null,
+        insights: [],
+        transactions: [],
+        copies: [],
+        health: null,
+        toast: '',
+        il: { pEntry: 100, pNow: 110, pLower: 90, pUpper: 120, result: null },
+        newCopy: { followerWallet: '', leaderWallet: '', poolId: '', capitalUsd: 100 },
+
+        async init() {
+          await this.loadHealth();
+          await this.loadPools('apr');
+          const saved = localStorage.getItem('lp-copilot-wallet');
+          if (saved) {
+            this.walletInput = saved;
+            await this.loadWallet();
+          }
+        },
+
+        showToast(msg) {
+          this.toast = msg;
+          setTimeout(() => (this.toast = ''), 3000);
+        },
+
+        async loadHealth() {
+          try {
+            const r = await fetch('/health');
+            this.health = await r.json();
+          } catch {}
+        },
+
+        async loadWallet() {
+          if (!this.walletInput) return;
+          this.wallet = this.walletInput.trim();
+          localStorage.setItem('lp-copilot-wallet', this.wallet);
+          this.loading = true;
+          try {
+            const r = await fetch(`/wallet/${this.wallet}/overview`);
+            const data = await r.json();
+            this.overview = data.overview ?? { totalValueUsd: 0, totalFeesEarnedUsd: 0, totalPnlUsd: 0, openPositionCount: 0, inRangeCount: 0, outOfRangeCount: 0 };
+            this.positions = data.positions ?? [];
+            this.history = data.history ?? [];
+            await this.loadInsights();
+            await this.loadTransactions();
+            await this.loadCopies();
+          } catch (e) {
+            this.showToast('Failed to load wallet, check API key and address');
+          }
+          this.loading = false;
+        },
+
+        async loadPools(sortBy) {
+          this.poolSort = sortBy;
+          try {
+            const r = await fetch(`/discover?sortBy=${sortBy}&minTvl=10000&limit=20`);
+            const data = await r.json();
+            this.pools = data.pools ?? [];
+          } catch {
+            const r = await fetch(`/pools?sortBy=${sortBy}&limit=20`);
+            const data = await r.json();
+            this.pools = data.pools ?? [];
+          }
+        },
+
+        async openPool(poolId) {
+          this.tab = 'pool-detail';
+          this.poolDetail = null;
+          this.leaders = null;
+          try {
+            const r = await fetch(`/pool/${poolId}/recommend`);
+            this.poolDetail = await r.json();
+          } catch (e) {
+            this.showToast('Failed to load pool');
+          }
+        },
+
+        async loadLeaders(poolId) {
+          try {
+            const r = await fetch(`/pool/${poolId}/leaders`);
+            this.leaders = await r.json();
+          } catch {
+            this.showToast('Top LPs requires Premium API tier');
+          }
+        },
+
+        async zapOut(positionId, bps) {
+          if (!confirm(`Zap out ${bps / 100}% of position ${positionId.slice(0, 8)}?`)) return;
+          try {
+            const r = await fetch('/zap-out', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ walletAddress: this.wallet, positionId, bps, output: 'both' }),
+            });
+            const data = await r.json();
+            this.showToast(`Zap-out queued, job ${data.jobId.slice(0, 8)}`);
+            setTimeout(() => this.loadTransactions(), 2000);
+          } catch {
+            this.showToast('Zap-out failed');
+          }
+        },
+
+        async generateInsights() {
+          try {
+            await fetch('/insights/generate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ walletAddress: this.wallet }),
+            });
+            this.showToast('Generating insights, refresh in a few seconds');
+            setTimeout(() => this.loadInsights(), 4000);
+          } catch {}
+        },
+
+        async loadInsights() {
+          if (!this.wallet) return;
+          try {
+            const r = await fetch(`/insights?walletAddress=${this.wallet}&limit=30`);
+            const data = await r.json();
+            this.insights = data.insights ?? [];
+          } catch {}
+        },
+
+        async loadTransactions() {
+          if (!this.wallet) return;
+          try {
+            const r = await fetch(`/transactions?walletAddress=${this.wallet}&limit=50`);
+            const data = await r.json();
+            this.transactions = data.transactions ?? [];
+          } catch {}
+        },
+
+        async loadCopies() {
+          if (!this.wallet) return;
+          try {
+            const r = await fetch(`/copylp?followerWallet=${this.wallet}`);
+            const data = await r.json();
+            this.copies = data.subscriptions ?? [];
+          } catch {}
+        },
+
+        async addCopy() {
+          if (!this.newCopy.followerWallet || !this.newCopy.leaderWallet || !this.newCopy.poolId || !this.newCopy.capitalUsd) {
+            this.showToast('Fill all fields');
+            return;
+          }
+          try {
+            await fetch('/copylp', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this.newCopy),
+            });
+            this.showToast('Copy-LP subscription added');
+            this.newCopy = { followerWallet: this.wallet, leaderWallet: '', poolId: '', capitalUsd: 100 };
+            await this.loadCopies();
+          } catch {
+            this.showToast('Failed');
+          }
+        },
+
+        copyLpModal(leader, poolId) {
+          this.newCopy.followerWallet = this.wallet || '';
+          this.newCopy.leaderWallet = leader;
+          this.newCopy.poolId = poolId;
+          this.tab = 'copylp';
+          this.showToast('Pre-filled, set capital and click Add');
+        },
+
+        async cancelCopy(id) {
+          await fetch(`/copylp/${id}`, { method: 'DELETE' });
+          await this.loadCopies();
+        },
+
+        async calcIL() {
+          try {
+            const r = await fetch('/intelligence/il', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this.il),
+            });
+            const data = await r.json();
+            this.il.result = data.ilPct;
+          } catch {
+            this.showToast('Calculation failed');
+          }
+        },
+      };
+    }
+  </script>
+</body>
+</html>

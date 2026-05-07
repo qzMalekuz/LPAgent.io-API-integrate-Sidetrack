@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rtk wc *)",
+      "Bash(rtk npm *)",
+      "Bash(rtk read *)",
+      "Bash(/usr/bin/find /Users/qzmalekuz/Documents/root/LPAgent.io -maxdepth 2 -type d ! -path '*/node_modules*' ! -path '*/.git*')",
+      "WebFetch(domain:docs.lpagent.io)",
+      "WebFetch(domain:lpagent.io)",
+      "WebFetch(domain:portal.lpagent.io)",
+      "Bash(rtk prisma *)",
+      "Bash(npm install *)",
+      "Bash(rtk proxy *)",
+      "Bash(npm run *)",
+      "Bash(/usr/bin/grep -rlP \"[^\\\\x00-\\\\x7F]\" --include=\"*.ts\" --include=\"*.html\" --include=\"*.md\" lpagent-sidetrack/src lpagent-sidetrack/public README.md)",
+      "Bash(/usr/bin/grep -rl '[^[:print:][:space:]]' --include='*.ts' --include='*.html' --include='*.md' lpagent-sidetrack/src lpagent-sidetrack/public README.md)"
+    ]
+  }
+}
